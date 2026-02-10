@@ -1,0 +1,11 @@
+name: Lesson 1 - Hello Actions
+
+on:
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Salom deyish
+        run: echo "Salom bro 👋 GitHub Actions ishladi!"
