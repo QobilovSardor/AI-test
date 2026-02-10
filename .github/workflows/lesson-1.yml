@@ -1,11 +1,18 @@
-name: Lesson 1 - Hello Actions
+name: Lesson 2 - Issue Trigger
 
 on:
-  workflow_dispatch:
+  issues:
+    types: [opened]
 
 jobs:
-  hello:
+  read-issue:
     runs-on: ubuntu-latest
     steps:
-      - name: Salom deyish
-        run: echo "Salom bro 👋 GitHub Actions ishladi!"
+      - name: Issue matnini ko‘rsat
+        run: |
+          echo "📌 ISSUE TITLE:"
+          echo "${{ github.event.issue.title }}"
+
+          echo ""
+          echo "📝 ISSUE BODY:"
+          echo "${{ github.event.issue.body }}"
