@@ -1,9 +1,11 @@
 name: Gemini Runner (Issue + Manual)
 
 on:
+  # Issue ochilganda ham ishlasin
   issues:
     types: [opened]
 
+  # Har safar issue ochmasdan, Run workflow tugmasi bilan ham ishlasin
   workflow_dispatch:
     inputs:
       task:
@@ -11,9 +13,9 @@ on:
         required: true
         type: string
       model:
-        description: "Model nomi (listmodels dan ko'rasiz)"
+        description: "Model nomi (masalan: models/gemini-2.5-pro yoki models/gemini-3-pro-preview)"
         required: false
-        default: "gemini-1.5-flash"
+        default: "models/gemini-2.5-pro"
         type: string
 
 jobs:
@@ -43,13 +45,14 @@ jobs:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: |
           echo "===== LIST MODELS ====="
-          curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}" | jq -r '.models[].name'
+          curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}" \
+            | jq -r '.models[].name'
 
       - name: Gemini ga so'rov yuborish
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TASK: ${{ steps.pick.outputs.TASK }}
-          MODEL: ${{ github.event.inputs.model || 'gemini-1.5-flash' }}
+          MODEL: ${{ github.event.inputs.model || 'models/gemini-2.5-pro' }}
         run: |
           echo "SOURCE: ${{ steps.pick.outputs.SOURCE }}"
           echo "MODEL: $MODEL"
@@ -61,7 +64,7 @@ jobs:
           BODY=$(jq -n --arg text "$TASK" '{contents:[{parts:[{text:$text}]}]}')
 
           echo "===== GEMINI RAW JSON RESPONSE ====="
-          RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
+          RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "$BODY")
 
@@ -69,4 +72,4 @@ jobs:
           echo ""
 
           echo "===== GEMINI TEXT (tozalangan) ====="
-          echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // "No text returned (check API key/model/limits)"'
+          echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // "No text returned (check model/limits/API key)"'
