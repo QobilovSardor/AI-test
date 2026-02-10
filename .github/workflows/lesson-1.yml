@@ -1,18 +1,36 @@
-name: Lesson 2 - Issue Trigger
+name: Lesson 3 - Gemini AI
 
 on:
   issues:
     types: [opened]
 
 jobs:
-  read-issue:
+  gemini:
     runs-on: ubuntu-latest
-    steps:
-      - name: Issue matnini ko‘rsat
-        run: |
-          echo "📌 ISSUE TITLE:"
-          echo "${{ github.event.issue.title }}"
 
+    steps:
+      - name: Gemini ga so'rov yuborish
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          echo "ISSUE TITLE:"
+          echo "${{ github.event.issue.title }}"
           echo ""
-          echo "📝 ISSUE BODY:"
+          echo "ISSUE BODY:"
           echo "${{ github.event.issue.body }}"
+          echo ""
+          echo "===== GEMINI RESPONSE ====="
+
+          curl -s https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=$GEMINI_API_KEY \
+            -H "Content-Type: application/json" \
+            -d '{
+              "contents": [
+                {
+                  "parts": [
+                    {
+                      "text": "You are a helpful AI assistant. Answer the following task:\n\nTitle: '"${{ github.event.issue.title }}"'\n\nTask:\n'"${{ github.event.issue.body }}"'"
+                    }
+                  ]
+                }
+              ]
+            }'
