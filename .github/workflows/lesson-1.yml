@@ -21,16 +21,17 @@ jobs:
           echo ""
           echo "===== GEMINI RESPONSE ====="
 
-          curl -s https://generativelanguage.googleapis.com/v1beta/models/gemini-pro:generateContent?key=$GEMINI_API_KEY \
+          curl -s https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-pro:generateContent?key=$GEMINI_API_KEY \
             -H "Content-Type: application/json" \
             -d '{
               "contents": [
                 {
                   "parts": [
                     {
-                      "text": "You are a helpful AI assistant. Answer the following task:\n\nTitle: '"${{ github.event.issue.title }}"'\n\nTask:\n'"${{ github.event.issue.body }}"'"
+                      "text": "You are a senior software engineer. Answer clearly and step by step.\n\nTask:\n'"${{ github.event.issue.body }}"'"
                     }
                   ]
                 }
               ]
             }'
+
