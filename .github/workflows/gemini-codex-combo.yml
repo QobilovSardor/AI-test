@@ -1,0 +1,129 @@
+name: Gemini + Codex Combo (Comment @gemini)
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  combo_pr:
+    # Faqat comment ichida @gemini bo'lsa ishlasin
+    if: contains(github.event.comment.body, '@gemini')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Extract task from comment
+        id: task
+        run: |
+          COMMENT='${{ github.event.comment.body }}'
+          TASK=$(printf "%s" "$COMMENT" | sed 's/@gemini//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+          echo "TASK<<EOF" >> $GITHUB_OUTPUT
+          echo "$TASK" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+          echo "ISSUE_TITLE=${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
+
+      # 1) GEMINI: reja/spec yozadi
+      - name: Gemini writes a short plan/spec
+        id: gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL: "models/gemini-2.5-flash"
+          TASK: ${{ steps.task.outputs.TASK }}
+        run: |
+          # Gemini API generateContent ishlatamiz
+          # (Google docs: generateContent endpoint) 
+          SYSTEM="You are a senior software architect.
+          Write a short implementation plan + acceptance criteria for the task.
+          Be concrete (files, steps). Keep it under 25 lines."
+
+          PROMPT=$(printf "%s\n\nTask:\n%s\n" "$SYSTEM" "$TASK")
+          BODY=$(jq -n --arg text "$PROMPT" '{contents:[{parts:[{text:$text}]}]}')
+
+          RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+
+          PLAN=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
+
+          echo "===== GEMINI PLAN ====="
+          echo "$PLAN"
+
+          # Outputga beramiz
+          echo "PLAN<<EOF" >> $GITHUB_OUTPUT
+          echo "$PLAN" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # 2) CODEX: Gemini plan + task bo'yicha kod yozadi (workspace-write)
+      - name: Run Codex (implements changes)
+        id: codex
+        uses: openai/codex-action@v1
+        with:
+          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
+          safety-strategy: drop-sudo
+          sandbox: workspace-write
+          prompt: |
+            You are Codex working inside a Git repository.
+            Implement changes directly in the working tree (create/edit files).
+            Follow the plan/spec below and satisfy acceptance criteria.
+
+            === TASK ===
+            ${{ steps.task.outputs.TASK }}
+
+            === GEMINI PLAN/SPEC ===
+            ${{ steps.gemini.outputs.PLAN }}
+
+            Rules:
+            - Keep changes minimal.
+            - Do not touch secrets or workflows unless the task asks.
+            - After edits, ensure repo has sensible structure.
+
+      - name: Create branch, commit, push
+        id: git
+        run: |
+          BRANCH="ai/gemini-codex-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
+
+          git status
+          git add -A
+
+          if git diff --cached --quiet; then
+            echo "No changes produced by Codex. Stop."
+            exit 1
+          fi
+
+          git config user.name "ai-bot"
+          git config user.email "ai-bot@users.noreply.github.com"
+          git commit -m "AI: ${{ steps.task.outputs.ISSUE_TITLE }} (#${{ steps.task.outputs.ISSUE_NUMBER }})"
+
+          git push --set-upstream origin "$BRANCH"
+
+          echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.git.outputs.BRANCH }}
+          ISSUE_NUMBER: ${{ steps.task.outputs.ISSUE_NUMBER }}
+          TASK: ${{ steps.task.outputs.TASK }}
+        run: |
+          gh pr create \
+            --head "$BRANCH" \
+            --title "AI PR: Gemini+Codex for issue #$ISSUE_NUMBER" \
+            --body "Task (from comment):\n\n$TASK\n\nCloses #$ISSUE_NUMBER"
+
+      - name: Comment back on issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.task.outputs.ISSUE_NUMBER }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "✅ PR created by Gemini (plan) + Codex (code). Check Pull Requests tab."
