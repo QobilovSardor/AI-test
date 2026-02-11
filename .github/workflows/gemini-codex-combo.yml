@@ -1,4 +1,4 @@
-name: Gemini + Codex Combo (Comment @gemini)
+name: Gemini Solo PR Bot (@gemini)
 
 on:
   issue_comment:
@@ -10,122 +10,62 @@ permissions:
   issues: write
 
 jobs:
-  combo_pr:
+  gemini_pr:
     if: contains(github.event.comment.body, '@gemini')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout repo
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Extract task from comment
+      - name: Extract task
         id: task
         run: |
           COMMENT='${{ github.event.comment.body }}'
-
-          # Remove @gemini and trim
-          TASK=$(printf "%s" "$COMMENT" \
-            | sed 's/@gemini//' \
-            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
-
+          TASK=$(printf "%s" "$COMMENT" | sed 's/@gemini//g' | sed 's/^[[:space:]]*//')
           echo "TASK<<EOF" >> $GITHUB_OUTPUT
           echo "$TASK" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
+          echo "ISSUE=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
 
-          echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
-          echo "ISSUE_TITLE=${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
-
-      # 1) GEMINI: Write a plan/spec
-      - name: Gemini writes plan/spec
+      - name: Gemini generates unified diff
         id: gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          MODEL: "models/gemini-2.5-flash"
-          TASK: ${{ steps.task.outputs.TASK }}
         run: |
-          INSTR="You are an expert software architect.
-          Write a clear implementation plan for the task below.
-          Include file names and step-by-step changes.
-          Do NOT output code, only plan/spec."
+          PROMPT="You are a coding agent.
+          Return ONLY a valid unified git diff.
+          Rules:
+          - Start with diff --git
+          - No markdown
+          - For new files use @@ -0,0 +1,N @@
+          Task:
+          ${{ steps.task.outputs.TASK }}"
 
-          PROMPT=$(printf "%s\n\nTask:\n%s\n" "$INSTR" "$TASK")
-          BODY=$(jq -n --arg text "$PROMPT" '{contents:[{parts:[{text:$text}]}]}')
+          BODY=$(jq -n --arg t "$PROMPT" '{contents:[{parts:[{text:$t}]}]}')
 
-          RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
+          RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "$BODY")
 
-          PLAN=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
-          echo "===== GEMINI PLAN ====="
-          echo "$PLAN"
+          DIFF=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
 
-          echo "PLAN<<EOF" >> $GITHUB_OUTPUT
-          echo "$PLAN" >> $GITHUB_OUTPUT
-          echo "EOF" >> $GITHUB_OUTPUT
-
-      # 2) CODEX: Implement based on plan
-      - name: Run Codex (workspace-write)
-        id: codex
-        uses: openai/codex-action@v1
-        with:
-          openai-api-key: ${{ secrets.OPENAI_API_KEY }}
-          safety-strategy: drop-sudo
-          sandbox: workspace-write
-          prompt: |
-            You are a coding agent inside a Git repo.
-            Implement changes as described in the plan/spec below.
-
-            === TASK ===
-            ${{ steps.task.outputs.TASK }}
-
-            === GEMINI PLAN ===
-            ${{ steps.gemini.outputs.PLAN }}
-
-            Rules:
-            - Only implement what is described.
-            - Do NOT modify workflow files unless requested.
-            - If required files don’t exist, create them.
-
-      # 3) Create branch & commit
-      - name: Create branch and commit
-        id: git
-        run: |
-          BRANCH="ai/gemini-codex-${{ github.run_id }}"
-          git checkout -b "$BRANCH"
-
-          git config user.name "ai-bot"
-          git config user.email "ai-bot@users.noreply.github.com"
-
-          git add -A
-
-          if git diff --cached --quiet; then
-            echo "No changes produced by Codex. Stopping."
-            exit 1
+          if [ -z "$DIFF" ]; then
+            echo "No diff returned"; exit 1
           fi
 
-          git commit -m "AI: ${{ steps.task.outputs.ISSUE_TITLE }} (#${{ steps.task.outputs.ISSUE_NUMBER }})"
-          git push --set-upstream origin "$BRANCH"
+          echo "$DIFF" > /tmp/patch.diff
+          git apply /tmp/patch.diff
 
-          echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
-
-      # 4) Open PR
-      - name: Open Pull Request
+      - name: Commit & PR
         env:
           GH_TOKEN: ${{ github.token }}
-          BRANCH: ${{ steps.git.outputs.BRANCH }}
-          ISSUE_NUMBER: ${{ steps.task.outputs.ISSUE_NUMBER }}
-          TASK: ${{ steps.task.outputs.TASK }}
         run: |
+          git checkout -b ai/gemini-${{ github.run_id }}
+          git add -A
+          git commit -m "AI: Gemini PR"
+          git push --set-upstream origin ai/gemini-${{ github.run_id }}
+
           gh pr create \
-            --head "$BRANCH" \
-            --title "AI PR: Gemini+Codex for issue #$ISSUE_NUMBER" \
-            --body "Task (from comment):\n\n$TASK\n\nCloses #$ISSUE_NUMBER"
-
-      # 5) Comment back on issue
-      - name: Issue Comment (PR created)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ steps.task.outputs.ISSUE_NUMBER }}
-        run: |
-          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --body "✅ PR created by Gemini (plan) + Codex (code). Check Pull Requests tab."
+            --title "AI PR by Gemini" \
+            --body "Generated from @gemini comment" \
+            --head ai/gemini-${{ github.run_id }}
