@@ -1,4 +1,4 @@
-name: Gemini Solo PR Bot (@gemini)
+name: Gemini Solo PR Bot (@gemini) - File Writer
 
 on:
   issue_comment:
@@ -15,57 +15,132 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout
+        uses: actions/checkout@v4
 
       - name: Extract task
         id: task
         run: |
           COMMENT='${{ github.event.comment.body }}'
-          TASK=$(printf "%s" "$COMMENT" | sed 's/@gemini//g' | sed 's/^[[:space:]]*//')
+          TASK=$(printf "%s" "$COMMENT" | sed 's/@gemini//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
           echo "TASK<<EOF" >> $GITHUB_OUTPUT
           echo "$TASK" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
-          echo "ISSUE=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
 
-      - name: Gemini generates unified diff
+          echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+
+      - name: Generate register.html content with Gemini (JSON output)
         id: gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TASK: ${{ steps.task.outputs.TASK }}
         run: |
-          PROMPT="You are a coding agent.
-          Return ONLY a valid unified git diff.
+          # Gemini'ga aniq format talab qilamiz: faqat JSON qaytarsin
+          PROMPT=$(cat <<'EOF'
+          You are a coding assistant.
+          
+          Return ONLY valid JSON (no markdown, no explanation) in this schema:
+          {
+            "files": [
+              {
+                "path": "register.html",
+                "content": "<FULL HTML HERE>"
+              }
+            ]
+          }
+          
           Rules:
-          - Start with diff --git
-          - No markdown
-          - For new files use @@ -0,0 +1,N @@
+          - Output must be pure JSON (first char {, last char }).
+          - content must be complete HTML page.
+          - Use Tailwind via CDN: <script src="https://cdn.tailwindcss.com"></script>
+          EOF
+          )
+          
+                    FULL_PROMPT="${PROMPT}
+          
           Task:
-          ${{ steps.task.outputs.TASK }}"
+          ${TASK}
+          "
 
-          BODY=$(jq -n --arg t "$PROMPT" '{contents:[{parts:[{text:$t}]}]}')
+          BODY=$(jq -n --arg text "$FULL_PROMPT" '{contents:[{parts:[{text:$text}]}]}')
 
           RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key=${GEMINI_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "$BODY")
 
-          DIFF=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
+          TEXT=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
 
-          if [ -z "$DIFF" ]; then
-            echo "No diff returned"; exit 1
+          if [ -z "$TEXT" ]; then
+            echo "No text returned from Gemini"; exit 1
           fi
 
-          echo "$DIFF" > /tmp/patch.diff
-          git apply /tmp/patch.diff
+          echo "===== GEMINI RAW TEXT (first 40 lines) ====="
+          echo "$TEXT" | sed -n '1,40p'
 
-      - name: Commit & PR
+          # JSON parse tekshiruv
+          echo "$TEXT" | jq . > /tmp/gemini.json
+
+          echo "JSON_PATH=/tmp/gemini.json" >> $GITHUB_OUTPUT
+
+      - name: Write files to repo
+        run: |
+          JSON_PATH="${{ steps.gemini.outputs.JSON_PATH }}"
+
+          COUNT=$(jq '.files | length' "$JSON_PATH")
+          if [ "$COUNT" -lt 1 ]; then
+            echo "No files in JSON"; exit 1
+          fi
+
+          # Har bir faylni yozamiz
+          for i in $(seq 0 $((COUNT-1))); do
+            PATH=$(jq -r ".files[$i].path" "$JSON_PATH")
+            CONTENT=$(jq -r ".files[$i].content" "$JSON_PATH")
+
+            if [ -z "$PATH" ] || [ "$PATH" = "null" ]; then
+              echo "Invalid file path"; exit 1
+            fi
+
+            mkdir -p "$(dirname "$PATH")" 2>/dev/null || true
+            printf "%s" "$CONTENT" > "$PATH"
+            echo "Wrote: $PATH"
+          done
+
+      - name: Create branch, commit, push
+        id: git
+        run: |
+          BRANCH="ai/gemini-${{ github.run_id }}"
+          git checkout -b "$BRANCH"
+
+          git config user.name "gemini-bot"
+          git config user.email "gemini-bot@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit"; exit 1
+          fi
+
+          git commit -m "AI: update from @gemini"
+          git push --set-upstream origin "$BRANCH"
+
+          echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
+
+      - name: Open PR
         env:
           GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.git.outputs.BRANCH }}
+          ISSUE_NUMBER: ${{ steps.task.outputs.ISSUE_NUMBER }}
+          TASK: ${{ steps.task.outputs.TASK }}
         run: |
-          git checkout -b ai/gemini-${{ github.run_id }}
-          git add -A
-          git commit -m "AI: Gemini PR"
-          git push --set-upstream origin ai/gemini-${{ github.run_id }}
-
           gh pr create \
-            --title "AI PR by Gemini" \
-            --body "Generated from @gemini comment" \
-            --head ai/gemini-${{ github.run_id }}
+            --head "$BRANCH" \
+            --title "AI PR: @gemini issue #$ISSUE_NUMBER" \
+            --body "Task:\n\n$TASK\n\nCloses #$ISSUE_NUMBER"
+
+      - name: Comment back on issue
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.task.outputs.ISSUE_NUMBER }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "✅ PR created. I wrote files directly (no git diff), so no corrupt patch errors."
