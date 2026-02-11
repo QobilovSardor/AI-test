@@ -11,7 +11,6 @@ permissions:
 
 jobs:
   gemini_pr:
-    # Faqat comment ichida @gemini bo'lsa ishlaydi
     if: contains(github.event.comment.body, '@gemini')
     runs-on: ubuntu-latest
 
@@ -24,7 +23,7 @@ jobs:
         run: |
           COMMENT='${{ github.event.comment.body }}'
 
-          # @gemini so'zini olib tashlab, qolganini task qilamiz
+          # @gemini ni olib tashlaymiz, qolganini task qilamiz
           TASK=$(printf "%s" "$COMMENT" | sed 's/@gemini//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
           echo "TASK<<EOF" >> $GITHUB_OUTPUT
@@ -43,7 +42,11 @@ jobs:
         run: |
           INSTR="You are an autonomous coding agent in a Git repository.
           Return ONLY a unified diff that can be applied with 'git apply'.
-          Output MUST start with 'diff --git'. No explanations, no markdown."
+          Rules:
+          - Output must start with: diff --git
+          - Do NOT wrap in triple backticks.
+          - For NEW files: use 'index 0000000..0000000' (do NOT invent hashes).
+          - Do not include explanations, markdown, or any extra text."
 
           PROMPT=$(printf "%s\n\nTask:\n%s\n" "$INSTR" "$TASK")
           BODY=$(jq -n --arg text "$PROMPT" '{contents:[{parts:[{text:$text}]}]}')
@@ -68,7 +71,7 @@ jobs:
           echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
           git checkout -b "$BRANCH"
 
-      - name: Diff apply qilish
+      - name: Diff apply qilish (clean + apply)
         env:
           DIFF: ${{ steps.gemini.outputs.DIFF }}
         run: |
@@ -77,7 +80,19 @@ jobs:
             exit 1
           fi
 
-          echo "$DIFF" > /tmp/changes.patch
+          # 1) ```diff va ``` code-fence'larni olib tashlaymiz
+          CLEAN=$(printf "%s\n" "$DIFF" \
+            | sed 's/^\`\`\`diff$//g' \
+            | sed 's/^\`\`\`$//g')
+
+          # 2) NEW FILE patchlarda Gemini ba'zan hash uydiradi — tozalaymiz
+          # index 0000000..SOMETHING -> index 0000000..0000000
+          CLEAN=$(printf "%s\n" "$CLEAN" | sed -E 's/^index 0{7}\.\.[0-9a-f]{7,40}$/index 0000000..0000000/g')
+
+          echo "===== CLEAN PATCH (first 120 lines) ====="
+          echo "$CLEAN" | sed -n '1,120p'
+
+          echo "$CLEAN" > /tmp/changes.patch
           git apply /tmp/changes.patch
 
       - name: Commit & push
