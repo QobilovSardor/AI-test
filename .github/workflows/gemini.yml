@@ -13,9 +13,9 @@ on:
         required: true
         type: string
       model:
-        description: "Model nomi (masalan: models/gemini-2.5-pro yoki models/gemini-3-pro-preview)"
+        description: "Model nomi (masalan: models/gemini-2.5-flash yoki models/gemini-3-pro-preview)"
         required: false
-        default: "models/gemini-2.5-pro"
+        default: "models/gemini-2.5-flash"
         type: string
 
 jobs:
@@ -52,7 +52,7 @@ jobs:
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TASK: ${{ steps.pick.outputs.TASK }}
-          MODEL: ${{ github.event.inputs.model || 'models/gemini-2.5-pro' }}
+          MODEL: ${{ github.event.inputs.model || 'models/gemini-2.5-flash' }}
         run: |
           echo "SOURCE: ${{ steps.pick.outputs.SOURCE }}"
           echo "MODEL: $MODEL"
