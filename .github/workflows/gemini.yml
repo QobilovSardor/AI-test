@@ -1,70 +1,149 @@
-name: Gemini Runner (Issue + Manual + Comment)
+name: Gemini PR Bot (Code -> PR)
 
 on:
   issues:
     types: [opened]
-
   workflow_dispatch:
     inputs:
       task:
-        description: "Gemini uchun task/prompt"
+        description: "Kod uchun task/prompt (manual run)"
         required: true
         type: string
       model:
-        description: "Model nomi (masalan: models/gemini-2.5-flash)"
+        description: "Model (tavsiya: models/gemini-2.5-flash)"
         required: false
         default: "models/gemini-2.5-flash"
         type: string
 
 permissions:
+  contents: write
+  pull-requests: write
   issues: write
 
 jobs:
-  gemini:
+  gemini_pr:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
       - name: Taskni tanlash (Issue yoki Manual)
         id: pick
         run: |
           if [ -n "${{ github.event.issue.body }}" ]; then
             echo "TASK<<EOF" >> $GITHUB_OUTPUT
+            echo "Title: ${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
+            echo "" >> $GITHUB_OUTPUT
             echo "${{ github.event.issue.body }}" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
-            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
             echo "SOURCE=issue" >> $GITHUB_OUTPUT
+            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+            echo "ISSUE_TITLE=${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
           else
             echo "TASK<<EOF" >> $GITHUB_OUTPUT
             echo "${{ github.event.inputs.task }}" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
-            echo "ISSUE_NUMBER=" >> $GITHUB_OUTPUT
             echo "SOURCE=manual" >> $GITHUB_OUTPUT
+            echo "ISSUE_NUMBER=" >> $GITHUB_OUTPUT
+            echo "ISSUE_TITLE=Manual run" >> $GITHUB_OUTPUT
           fi
 
-      - name: Gemini ga so'rov yuborish
+      - name: Gemini diff yaratadi (ONLY unified diff)
         id: gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-          TASK: ${{ steps.pick.outputs.TASK }}
           MODEL: ${{ github.event.inputs.model || 'models/gemini-2.5-flash' }}
+          TASK: ${{ steps.pick.outputs.TASK }}
         run: |
-          BODY=$(jq -n --arg text "$TASK" '{contents:[{parts:[{text:$text}]}]}')
+          echo "MODEL: $MODEL"
+          echo "===== TASK ====="
+          echo "$TASK"
+
+          PROMPT=$(cat <<'EOF'
+You are an autonomous coding agent working in a Git repository.
+
+Return ONLY a unified diff that can be applied with `git apply`.
+Rules:
+- Output must start with: diff --git
+- Do NOT include explanations, markdown fences, or extra text.
+- If no changes are needed, output an empty response.
+
+Task:
+EOF
+)
+          FULL_PROMPT="${PROMPT}
+${TASK}"
+
+          BODY=$(jq -n --arg text "$FULL_PROMPT" '{contents:[{parts:[{text:$text}]}]}')
 
           RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "$BODY")
 
-          TEXT=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text')
+          DIFF=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
 
-          echo "RESPONSE<<EOF" >> $GITHUB_OUTPUT
-          echo "$TEXT" >> $GITHUB_OUTPUT
+          # diff ni outputga yozamiz
+          echo "DIFF<<EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      - name: Issue ga komment yozish (faqat issue bo‘lsa)
-        if: steps.pick.outputs.SOURCE == 'issue'
+          # log uchun (qisqa)
+          echo "===== DIFF (first 200 lines) ====="
+          echo "$DIFF" | sed -n '1,200p'
+
+      - name: Branch yaratish
+        id: branch
+        run: |
+          BRANCH="ai/gemini-${{ github.run_id }}"
+          echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
+          git checkout -b "$BRANCH"
+
+      - name: Diff apply qilish
+        env:
+          DIFF: ${{ steps.gemini.outputs.DIFF }}
+        run: |
+          if [ -z "$DIFF" ]; then
+            echo "Gemini diff qaytarmadi. To'xtatildi."
+            exit 1
+          fi
+
+          # git apply diff
+          echo "$DIFF" > /tmp/changes.patch
+          git apply /tmp/changes.patch
+
+      - name: Commit va push
+        env:
+          BRANCH: ${{ steps.branch.outputs.BRANCH }}
+        run: |
+          git status
+
+          git config user.name "gemini-bot"
+          git config user.email "gemini-bot@users.noreply.github.com"
+
+          # Agar hech narsa o'zgarmagan bo'lsa
+          if git diff --quiet && git diff --cached --quiet; then
+            echo "Hech qanday o'zgarish yo'q. To'xtatildi."
+            exit 1
+          fi
+
+          git add -A
+          git commit -m "AI: ${{ steps.pick.outputs.ISSUE_TITLE }}"
+          git push --set-upstream origin "$BRANCH"
+
+      - name: PR ochish
         env:
           GH_TOKEN: ${{ github.token }}
-          ISSUE_NUMBER: ${{ steps.pick.outputs.ISSUE_NUMBER }}
-          COMMENT: ${{ steps.gemini.outputs.RESPONSE }}
+          BRANCH: ${{ steps.branch.outputs.BRANCH }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --body "$COMMENT"
+          TITLE="AI PR: ${{ steps.pick.outputs.ISSUE_TITLE }}"
+          BODY="Generated by Gemini via GitHub Actions."
+
+          # Issue bo'lsa link qo'shamiz
+          if [ -n "${{ steps.pick.outputs.ISSUE_NUMBER }}" ]; then
+            BODY="$BODY
+
+Closes #${{ steps.pick.outputs.ISSUE_NUMBER }}"
+          fi
+
+          gh pr create --head "$BRANCH" --title "$TITLE" --body "$BODY"
