@@ -11,19 +11,22 @@ permissions:
 
 jobs:
   combo_pr:
-    # Faqat comment ichida @gemini bo'lsa ishlasin
     if: contains(github.event.comment.body, '@gemini')
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout
+      - name: Checkout repo
         uses: actions/checkout@v4
 
       - name: Extract task from comment
         id: task
         run: |
           COMMENT='${{ github.event.comment.body }}'
-          TASK=$(printf "%s" "$COMMENT" | sed 's/@gemini//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+          # Remove @gemini and trim
+          TASK=$(printf "%s" "$COMMENT" \
+            | sed 's/@gemini//' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
           echo "TASK<<EOF" >> $GITHUB_OUTPUT
           echo "$TASK" >> $GITHUB_OUTPUT
@@ -32,21 +35,20 @@ jobs:
           echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
           echo "ISSUE_TITLE=${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
 
-      # 1) GEMINI: reja/spec yozadi
-      - name: Gemini writes a short plan/spec
+      # 1) GEMINI: Write a plan/spec
+      - name: Gemini writes plan/spec
         id: gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           MODEL: "models/gemini-2.5-flash"
           TASK: ${{ steps.task.outputs.TASK }}
         run: |
-          # Gemini API generateContent ishlatamiz
-          # (Google docs: generateContent endpoint) 
-          SYSTEM="You are a senior software architect.
-          Write a short implementation plan + acceptance criteria for the task.
-          Be concrete (files, steps). Keep it under 25 lines."
+          INSTR="You are an expert software architect.
+          Write a clear implementation plan for the task below.
+          Include file names and step-by-step changes.
+          Do NOT output code, only plan/spec."
 
-          PROMPT=$(printf "%s\n\nTask:\n%s\n" "$SYSTEM" "$TASK")
+          PROMPT=$(printf "%s\n\nTask:\n%s\n" "$INSTR" "$TASK")
           BODY=$(jq -n --arg text "$PROMPT" '{contents:[{parts:[{text:$text}]}]}')
 
           RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
@@ -54,17 +56,15 @@ jobs:
             -d "$BODY")
 
           PLAN=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
-
           echo "===== GEMINI PLAN ====="
           echo "$PLAN"
 
-          # Outputga beramiz
           echo "PLAN<<EOF" >> $GITHUB_OUTPUT
           echo "$PLAN" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
-      # 2) CODEX: Gemini plan + task bo'yicha kod yozadi (workspace-write)
-      - name: Run Codex (implements changes)
+      # 2) CODEX: Implement based on plan
+      - name: Run Codex (workspace-write)
         id: codex
         uses: openai/codex-action@v1
         with:
@@ -72,44 +72,44 @@ jobs:
           safety-strategy: drop-sudo
           sandbox: workspace-write
           prompt: |
-            You are Codex working inside a Git repository.
-            Implement changes directly in the working tree (create/edit files).
-            Follow the plan/spec below and satisfy acceptance criteria.
+            You are a coding agent inside a Git repo.
+            Implement changes as described in the plan/spec below.
 
             === TASK ===
             ${{ steps.task.outputs.TASK }}
 
-            === GEMINI PLAN/SPEC ===
+            === GEMINI PLAN ===
             ${{ steps.gemini.outputs.PLAN }}
 
             Rules:
-            - Keep changes minimal.
-            - Do not touch secrets or workflows unless the task asks.
-            - After edits, ensure repo has sensible structure.
+            - Only implement what is described.
+            - Do NOT modify workflow files unless requested.
+            - If required files don’t exist, create them.
 
-      - name: Create branch, commit, push
+      # 3) Create branch & commit
+      - name: Create branch and commit
         id: git
         run: |
           BRANCH="ai/gemini-codex-${{ github.run_id }}"
           git checkout -b "$BRANCH"
 
-          git status
+          git config user.name "ai-bot"
+          git config user.email "ai-bot@users.noreply.github.com"
+
           git add -A
 
           if git diff --cached --quiet; then
-            echo "No changes produced by Codex. Stop."
+            echo "No changes produced by Codex. Stopping."
             exit 1
           fi
 
-          git config user.name "ai-bot"
-          git config user.email "ai-bot@users.noreply.github.com"
           git commit -m "AI: ${{ steps.task.outputs.ISSUE_TITLE }} (#${{ steps.task.outputs.ISSUE_NUMBER }})"
-
           git push --set-upstream origin "$BRANCH"
 
           echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
 
-      - name: Open PR
+      # 4) Open PR
+      - name: Open Pull Request
         env:
           GH_TOKEN: ${{ github.token }}
           BRANCH: ${{ steps.git.outputs.BRANCH }}
@@ -121,9 +121,11 @@ jobs:
             --title "AI PR: Gemini+Codex for issue #$ISSUE_NUMBER" \
             --body "Task (from comment):\n\n$TASK\n\nCloses #$ISSUE_NUMBER"
 
-      - name: Comment back on issue
+      # 5) Comment back on issue
+      - name: Issue Comment (PR created)
         env:
           GH_TOKEN: ${{ github.token }}
           ISSUE_NUMBER: ${{ steps.task.outputs.ISSUE_NUMBER }}
         run: |
-          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "✅ PR created by Gemini (plan) + Codex (code). Check Pull Requests tab."
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
+            --body "✅ PR created by Gemini (plan) + Codex (code). Check Pull Requests tab."
