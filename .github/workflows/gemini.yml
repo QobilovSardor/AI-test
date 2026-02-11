@@ -1,22 +1,23 @@
-name: Gemini Runner (Issue + Manual)
+name: Gemini Runner (Issue + Manual + Comment)
 
 on:
-  # Issue ochilganda ham ishlasin
   issues:
     types: [opened]
 
-  # Har safar issue ochmasdan, Run workflow tugmasi bilan ham ishlasin
   workflow_dispatch:
     inputs:
       task:
-        description: "Gemini uchun task/prompt yozing"
+        description: "Gemini uchun task/prompt"
         required: true
         type: string
       model:
-        description: "Model nomi (masalan: models/gemini-2.5-flash yoki models/gemini-3-pro-preview)"
+        description: "Model nomi (masalan: models/gemini-2.5-flash)"
         required: false
         default: "models/gemini-2.5-flash"
         type: string
+
+permissions:
+  issues: write
 
 jobs:
   gemini:
@@ -28,48 +29,42 @@ jobs:
         run: |
           if [ -n "${{ github.event.issue.body }}" ]; then
             echo "TASK<<EOF" >> $GITHUB_OUTPUT
-            echo "Title: ${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
-            echo "" >> $GITHUB_OUTPUT
             echo "${{ github.event.issue.body }}" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
+            echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
             echo "SOURCE=issue" >> $GITHUB_OUTPUT
           else
             echo "TASK<<EOF" >> $GITHUB_OUTPUT
             echo "${{ github.event.inputs.task }}" >> $GITHUB_OUTPUT
             echo "EOF" >> $GITHUB_OUTPUT
+            echo "ISSUE_NUMBER=" >> $GITHUB_OUTPUT
             echo "SOURCE=manual" >> $GITHUB_OUTPUT
           fi
 
-      - name: Gemini modellari ro'yxati (ListModels)
-        env:
-          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
-        run: |
-          echo "===== LIST MODELS ====="
-          curl -s "https://generativelanguage.googleapis.com/v1beta/models?key=${GEMINI_API_KEY}" \
-            | jq -r '.models[].name'
-
       - name: Gemini ga so'rov yuborish
+        id: gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TASK: ${{ steps.pick.outputs.TASK }}
           MODEL: ${{ github.event.inputs.model || 'models/gemini-2.5-flash' }}
         run: |
-          echo "SOURCE: ${{ steps.pick.outputs.SOURCE }}"
-          echo "MODEL: $MODEL"
-          echo ""
-          echo "===== TASK ====="
-          echo "$TASK"
-          echo ""
-
           BODY=$(jq -n --arg text "$TASK" '{contents:[{parts:[{text:$text}]}]}')
 
-          echo "===== GEMINI RAW JSON RESPONSE ====="
           RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
             -H "Content-Type: application/json" \
             -d "$BODY")
 
-          echo "$RESP"
-          echo ""
+          TEXT=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text')
 
-          echo "===== GEMINI TEXT (tozalangan) ====="
-          echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // "No text returned (check model/limits/API key)"'
+          echo "RESPONSE<<EOF" >> $GITHUB_OUTPUT
+          echo "$TEXT" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Issue ga komment yozish (faqat issue bo‘lsa)
+        if: steps.pick.outputs.SOURCE == 'issue'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.pick.outputs.ISSUE_NUMBER }}
+          COMMENT: ${{ steps.gemini.outputs.RESPONSE }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --body "$COMMENT"
