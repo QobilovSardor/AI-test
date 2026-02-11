@@ -22,21 +22,23 @@ jobs:
         id: task
         run: |
           COMMENT='${{ github.event.comment.body }}'
-          TASK=$(printf "%s" "$COMMENT" | sed 's/@gemini//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+          TASK=$(printf "%s" "$COMMENT" \
+            | sed 's/@gemini//g' \
+            | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
 
           echo "TASK<<EOF" >> $GITHUB_OUTPUT
           echo "$TASK" >> $GITHUB_OUTPUT
           echo "EOF" >> $GITHUB_OUTPUT
 
           echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+          echo "ISSUE_TITLE=${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
 
-      - name: Generate register.html content with Gemini (JSON output)
+      - name: Generate files JSON with Gemini (cleans ```json fences)
         id: gemini
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           TASK: ${{ steps.task.outputs.TASK }}
         run: |
-          # Gemini'ga aniq format talab qilamiz: faqat JSON qaytarsin
           PROMPT=$(cat <<'EOF'
           You are a coding assistant.
           
@@ -52,7 +54,8 @@ jobs:
           
           Rules:
           - Output must be pure JSON (first char {, last char }).
-          - content must be complete HTML page.
+          - Do NOT wrap JSON in ``` fences.
+          - content must be a complete HTML page.
           - Use Tailwind via CDN: <script src="https://cdn.tailwindcss.com"></script>
           EOF
           )
@@ -72,14 +75,27 @@ jobs:
           TEXT=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
 
           if [ -z "$TEXT" ]; then
-            echo "No text returned from Gemini"; exit 1
+            echo "No text returned from Gemini"
+            echo "$RESP"
+            exit 1
           fi
 
-          echo "===== GEMINI RAW TEXT (first 40 lines) ====="
-          echo "$TEXT" | sed -n '1,40p'
+          echo "===== GEMINI RAW TEXT (first 20 lines) ====="
+          echo "$TEXT" | sed -n '1,20p'
 
-          # JSON parse tekshiruv
-          echo "$TEXT" | jq . > /tmp/gemini.json
+          # 1) Remove ```json and ``` fences if Gemini still adds them
+          CLEAN=$(printf "%s\n" "$TEXT" \
+            | sed 's/^```json[[:space:]]*$//g' \
+            | sed 's/^```[[:space:]]*$//g')
+
+          # 2) Keep only from first '{' (ignore any accidental leading text)
+          CLEAN=$(printf "%s" "$CLEAN" | awk 'BEGIN{p=0} /{/{p=1} p{print}')
+
+          echo "===== CLEAN JSON (first 20 lines) ====="
+          echo "$CLEAN" | sed -n '1,20p'
+
+          # 3) Validate JSON
+          echo "$CLEAN" | jq . > /tmp/gemini.json
 
           echo "JSON_PATH=/tmp/gemini.json" >> $GITHUB_OUTPUT
 
@@ -89,16 +105,17 @@ jobs:
 
           COUNT=$(jq '.files | length' "$JSON_PATH")
           if [ "$COUNT" -lt 1 ]; then
-            echo "No files in JSON"; exit 1
+            echo "No files in JSON"
+            exit 1
           fi
 
-          # Har bir faylni yozamiz
           for i in $(seq 0 $((COUNT-1))); do
             PATH=$(jq -r ".files[$i].path" "$JSON_PATH")
             CONTENT=$(jq -r ".files[$i].content" "$JSON_PATH")
 
             if [ -z "$PATH" ] || [ "$PATH" = "null" ]; then
-              echo "Invalid file path"; exit 1
+              echo "Invalid file path"
+              exit 1
             fi
 
             mkdir -p "$(dirname "$PATH")" 2>/dev/null || true
@@ -117,10 +134,11 @@ jobs:
 
           git add -A
           if git diff --cached --quiet; then
-            echo "No changes to commit"; exit 1
+            echo "No changes to commit"
+            exit 1
           fi
 
-          git commit -m "AI: update from @gemini"
+          git commit -m "AI: ${{ steps.task.outputs.ISSUE_TITLE }} (#${{ steps.task.outputs.ISSUE_NUMBER }})"
           git push --set-upstream origin "$BRANCH"
 
           echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
@@ -143,4 +161,4 @@ jobs:
           ISSUE_NUMBER: ${{ steps.task.outputs.ISSUE_NUMBER }}
         run: |
           gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" \
-            --body "✅ PR created. I wrote files directly (no git diff), so no corrupt patch errors."
+            --body "✅ PR created. Gemini returned JSON -> workflow wrote files directly (no git diff), so no corrupt patch."
