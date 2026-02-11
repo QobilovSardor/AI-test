@@ -1,0 +1,101 @@
+name: Gemini PR Bot (Code -> PR)
+
+on:
+  workflow_dispatch:
+    inputs:
+      task:
+        description: "Task / prompt (masalan: new file yarat, component yoz, bug fix...)"
+        required: true
+        type: string
+      model:
+        description: "Model (default: models/gemini-2.5-flash)"
+        required: false
+        default: "models/gemini-2.5-flash"
+        type: string
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  gemini_pr:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Gemini diff yaratadi (ONLY unified diff)
+        id: gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL: ${{ github.event.inputs.model }}
+          TASK: ${{ github.event.inputs.task }}
+        run: |
+          echo "MODEL: $MODEL"
+          echo "TASK: $TASK"
+
+          # Promptni xavfsiz quramiz (multiline YAML yo'q)
+          INSTR="You are an autonomous coding agent in a Git repository. Return ONLY a unified diff that can be applied with 'git apply'. Output must start with 'diff --git'. No explanations."
+          PROMPT=$(printf "%s\n\nTask:\n%s\n" "$INSTR" "$TASK")
+
+          BODY=$(jq -n --arg text "$PROMPT" '{contents:[{parts:[{text:$text}]}]}')
+
+          RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+
+          DIFF=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
+
+          echo "===== DIFF (first 200 lines) ====="
+          echo "$DIFF" | sed -n '1,200p'
+
+          echo "DIFF<<EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Create branch
+        id: branch
+        run: |
+          BRANCH="ai/gemini-${{ github.run_id }}"
+          echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
+          git checkout -b "$BRANCH"
+
+      - name: Apply diff
+        env:
+          DIFF: ${{ steps.gemini.outputs.DIFF }}
+        run: |
+          if [ -z "$DIFF" ]; then
+            echo "Gemini diff qaytarmadi. To'xtatildi."
+            exit 1
+          fi
+
+          echo "$DIFF" > /tmp/changes.patch
+          git apply /tmp/changes.patch
+
+      - name: Commit & push
+        env:
+          BRANCH: ${{ steps.branch.outputs.BRANCH }}
+        run: |
+          git config user.name "gemini-bot"
+          git config user.email "gemini-bot@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Hech narsa o'zgarmadi. To'xtatildi."
+            exit 1
+          fi
+
+          git commit -m "AI changes (Gemini)"
+          git push --set-upstream origin "$BRANCH"
+
+      - name: Open PR
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.BRANCH }}
+          TASK: ${{ github.event.inputs.task }}
+        run: |
+          gh pr create \
+            --head "$BRANCH" \
+            --title "AI PR: Gemini changes" \
+            --body "Task:\n\n$TASK"
