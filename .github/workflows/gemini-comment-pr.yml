@@ -1,0 +1,116 @@
+name: Gemini PR Bot (Comment @gemini)
+
+on:
+  issue_comment:
+    types: [created]
+
+permissions:
+  contents: write
+  pull-requests: write
+  issues: write
+
+jobs:
+  gemini_pr:
+    # Faqat comment ichida @gemini bo'lsa ishlaydi
+    if: contains(github.event.comment.body, '@gemini')
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Commentdan taskni olish
+        id: pick
+        run: |
+          COMMENT='${{ github.event.comment.body }}'
+
+          # @gemini so'zini olib tashlab, qolganini task qilamiz
+          TASK=$(printf "%s" "$COMMENT" | sed 's/@gemini//g' | sed 's/^[[:space:]]*//;s/[[:space:]]*$//')
+
+          echo "TASK<<EOF" >> $GITHUB_OUTPUT
+          echo "$TASK" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+          echo "ISSUE_NUMBER=${{ github.event.issue.number }}" >> $GITHUB_OUTPUT
+          echo "ISSUE_TITLE=${{ github.event.issue.title }}" >> $GITHUB_OUTPUT
+
+      - name: Gemini diff yaratadi (ONLY unified diff)
+        id: gemini
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          MODEL: "models/gemini-2.5-flash"
+          TASK: ${{ steps.pick.outputs.TASK }}
+        run: |
+          INSTR="You are an autonomous coding agent in a Git repository.
+          Return ONLY a unified diff that can be applied with 'git apply'.
+          Output MUST start with 'diff --git'. No explanations, no markdown."
+
+          PROMPT=$(printf "%s\n\nTask:\n%s\n" "$INSTR" "$TASK")
+          BODY=$(jq -n --arg text "$PROMPT" '{contents:[{parts:[{text:$text}]}]}')
+
+          RESP=$(curl -s "https://generativelanguage.googleapis.com/v1beta/${MODEL}:generateContent?key=${GEMINI_API_KEY}" \
+            -H "Content-Type: application/json" \
+            -d "$BODY")
+
+          DIFF=$(echo "$RESP" | jq -r '.candidates[0].content.parts[0].text // ""')
+
+          echo "===== DIFF (first 120 lines) ====="
+          echo "$DIFF" | sed -n '1,120p'
+
+          echo "DIFF<<EOF" >> $GITHUB_OUTPUT
+          echo "$DIFF" >> $GITHUB_OUTPUT
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Branch yaratish
+        id: branch
+        run: |
+          BRANCH="ai/gemini-comment-${{ github.run_id }}"
+          echo "BRANCH=$BRANCH" >> $GITHUB_OUTPUT
+          git checkout -b "$BRANCH"
+
+      - name: Diff apply qilish
+        env:
+          DIFF: ${{ steps.gemini.outputs.DIFF }}
+        run: |
+          if [ -z "$DIFF" ]; then
+            echo "Gemini diff qaytarmadi. To'xtatildi."
+            exit 1
+          fi
+
+          echo "$DIFF" > /tmp/changes.patch
+          git apply /tmp/changes.patch
+
+      - name: Commit & push
+        env:
+          BRANCH: ${{ steps.branch.outputs.BRANCH }}
+        run: |
+          git config user.name "gemini-bot"
+          git config user.email "gemini-bot@users.noreply.github.com"
+
+          git add -A
+          if git diff --cached --quiet; then
+            echo "Hech narsa o'zgarmadi. To'xtatildi."
+            exit 1
+          fi
+
+          git commit -m "AI: @gemini on issue #${{ steps.pick.outputs.ISSUE_NUMBER }}"
+          git push --set-upstream origin "$BRANCH"
+
+      - name: PR ochish
+        env:
+          GH_TOKEN: ${{ github.token }}
+          BRANCH: ${{ steps.branch.outputs.BRANCH }}
+          ISSUE_NUMBER: ${{ steps.pick.outputs.ISSUE_NUMBER }}
+          TASK: ${{ steps.pick.outputs.TASK }}
+        run: |
+          gh pr create \
+            --head "$BRANCH" \
+            --title "AI PR: @gemini from issue #$ISSUE_NUMBER" \
+            --body "Task (from comment):\n\n$TASK\n\nCloses #$ISSUE_NUMBER"
+
+      - name: Issue ga komment yozish (PR ochildi)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ISSUE_NUMBER: ${{ steps.pick.outputs.ISSUE_NUMBER }}
+        run: |
+          gh issue comment "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --body "✅ PR created from @gemini comment. Check Pull Requests tab."
