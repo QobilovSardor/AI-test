@@ -97,5 +97,6 @@ jobs:
         run: |
           gh pr create \
             --head "$BRANCH" \
-            --title "AI PR: Gemini changes" \
-            --body "Task:\n\n$TASK"
+            --title "AI PR: @gemini from issue #$ISSUE_NUMBER" \
+            --body "Task (from comment):\n\n$TASK\n\nCloses #$ISSUE_NUMBER"
+
